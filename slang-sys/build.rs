@@ -1,125 +1,123 @@
 extern crate bindgen;
 
 use std::env;
+use std::path::PathBuf;
 
-fn main() {
-	println!("cargo:rerun-if-env-changed=SLANG_DIR");
-	println!("cargo:rerun-if-env-changed=SLANG_INCLUDE_DIR");
-	println!("cargo:rerun-if-env-changed=SLANG_LIB_DIR");
-	println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+#[allow(unused_imports)]
+use anyhow::{bail, Context};
 
-	let include_dir = if let Ok(dir) = env::var("SLANG_INCLUDE_DIR") {
-		dir
-	} else if let Ok(dir) = env::var("SLANG_DIR") {
-		format!("{dir}/include")
-	} else if let Ok(dir) = env::var("VULKAN_SDK") {
-		format!("{dir}/include/slang")
-	} else {
-		panic!("The environment variable SLANG_INCLUDE_DIR, SLANG_DIR, or VULKAN_SDK must be set");
-	};
+fn main() -> anyhow::Result<()> {
+    let out_dir = env::var("OUT_DIR")
+        .map(PathBuf::from)
+        .context("Couldn't determine output directory.")?;
 
-	let lib_dir = if let Ok(dir) = env::var("SLANG_LIB_DIR") {
-		dir
-	} else if let Ok(dir) = env::var("SLANG_DIR") {
-		format!("{dir}/lib")
-	} else if let Ok(dir) = env::var("VULKAN_SDK") {
-		format!("{dir}/lib")
-	} else {
-		panic!("The environment variable SLANG_LIB_DIR, SLANG_DIR, or VULKAN_SDK must be set");
-	};
+    let slang_dir = env::var("SLANG_DIR").map(PathBuf::from);
 
-	if !lib_dir.is_empty() {
-		println!("cargo:rustc-link-search=native={lib_dir}");
-	}
+    let (slang_h, slang_lib) = if let Ok(slang_dir) = slang_dir {
+        (
+            slang_dir.join("include").join("slang.h"),
+            slang_dir.join("lib"),
+        )
+    } else {
+        #[cfg(feature = "from-source")]
+        {
+            let dst = build_from_source();
+            (dst.join("include").join("slang.h"), dst.join("lib"))
+        }
 
-	println!("cargo:rustc-link-lib=dylib=slang");
+        #[cfg(not(feature = "from-source"))]
+        bail!(
+            "Environment variable `SLANG_DIR` should be set to the directory of a Slang installation.");
+    };
 
-	let out_dir = env::var("OUT_DIR").expect("Couldn't determine output directory.");
+    println!("cargo:rustc-link-search=native={}", slang_lib.display());
+    println!("cargo:rustc-link-lib=dylib=slang");
 
-	bindgen::builder()
-		.header(format!("{include_dir}/slang.h").as_str())
-		.clang_arg("-v")
-		.clang_arg("-xc++")
-		.clang_arg("-std=c++17")
-		.allowlist_function("spReflection.*")
-		.allowlist_function("spComputeStringHash")
-		.allowlist_function("slang_.*")
-		.allowlist_type("slang.*")
-		.allowlist_var("SLANG_.*")
-		.with_codegen_config(
-			bindgen::CodegenConfig::FUNCTIONS
-				| bindgen::CodegenConfig::TYPES
-				| bindgen::CodegenConfig::VARS,
-		)
-		.parse_callbacks(Box::new(ParseCallback {}))
-		.default_enum_style(bindgen::EnumVariation::Rust {
-			non_exhaustive: false,
-		})
-		.constified_enum("SlangProfileID")
-		.constified_enum("SlangCapabilityID")
-		.vtable_generation(true)
-		.layout_tests(false)
-		.derive_copy(true)
-		.generate()
-		.expect("Couldn't generate bindings.")
-		.write_to_file(format!("{out_dir}/bindings.rs").as_str())
-		.expect("Couldn't write bindings.");
+    bindgen::builder()
+        .header(slang_h.to_str().unwrap())
+        .clang_arg("-v")
+        .clang_arg("-xc++")
+        .clang_arg("-std=c++14")
+        .allowlist_function("slang_.*")
+        .allowlist_type("slang.*")
+        .allowlist_var("SLANG_.*")
+        .with_codegen_config(
+            bindgen::CodegenConfig::FUNCTIONS
+                | bindgen::CodegenConfig::TYPES
+                | bindgen::CodegenConfig::VARS,
+        )
+        .parse_callbacks(Box::new(ParseCallback {}))
+        .default_enum_style(bindgen::EnumVariation::Rust {
+            non_exhaustive: true,
+        })
+        .vtable_generation(true)
+        .layout_tests(false)
+        .derive_copy(true)
+        .generate()
+        .context("Couldn't generate bindings.")?
+        .write_to_file(out_dir.join("bindings.rs"))
+        .context("Couldn't write bindings.")?;
+
+    Ok(())
+}
+
+#[cfg(feature = "from-source")]
+fn build_from_source() -> PathBuf {
+    const SLANG_VERSION: &str = "v2025.5";
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let source_path = manifest_dir.join("slang");
+
+    let mut cfg = cmake::Config::new(source_path);
+    cfg.define("SLANG_VERSION_FULL", SLANG_VERSION);
+    cfg.define(
+        "SLANG_VERSION_NUMERIC",
+        SLANG_VERSION.strip_prefix('v').unwrap(),
+    );
+
+    std::fs::canonicalize(cfg.build()).unwrap()
 }
 
 #[derive(Debug)]
 struct ParseCallback {}
 
 impl bindgen::callbacks::ParseCallbacks for ParseCallback {
-	fn enum_variant_name(
-		&self,
-		enum_name: Option<&str>,
-		original_variant_name: &str,
-		_variant_value: bindgen::callbacks::EnumVariantValue,
-	) -> Option<String> {
-		let enum_name = enum_name?;
+    fn enum_variant_name(
+        &self,
+        enum_name: Option<&str>,
+        original_variant_name: &str,
+        _variant_value: bindgen::callbacks::EnumVariantValue,
+    ) -> Option<String> {
+        let enum_name = enum_name?;
 
-		// Map enum names to the part of their variant names that needs to be trimmed.
-		// When an enum name is not in this map the code below will try to trim the enum name itself.
-		let mut map = std::collections::HashMap::new();
-		map.insert("SlangMatrixLayoutMode", "SlangMatrixLayout");
-		map.insert("SlangCompileTarget", "Slang");
+        // Map enum names to the part of their variant names that needs to be trimmed.
+        // When an enum name is not in this map the code below will try to trim the enum name itself.
+        let mut map = std::collections::HashMap::new();
+        map.insert("SlangMatrixLayoutMode", "SlangMatrixLayout");
+        map.insert("SlangCompileTarget", "Slang");
 
-		let trim = map.get(enum_name).unwrap_or(&enum_name);
-		let new_variant_name = pascal_case_from_snake_case(original_variant_name);
-		let new_variant_name = new_variant_name.trim_start_matches(trim);
-		Some(new_variant_name.to_string())
-	}
-
-	#[cfg(feature = "serde")]
-	fn add_derives(&self, info: &bindgen::callbacks::DeriveInfo<'_>) -> Vec<String> {
-		if info.name.starts_with("Slang") && info.kind == bindgen::callbacks::TypeKind::Enum {
-			return vec!["serde::Serialize".into(), "serde::Deserialize".into()];
-		}
-		vec![]
-	}
+        let trim = map.get(enum_name).unwrap_or(&enum_name);
+        let new_variant_name = pascal_case_from_snake_case(original_variant_name);
+        let new_variant_name = new_variant_name.trim_start_matches(trim);
+        Some(new_variant_name.to_string())
+    }
 }
 
 /// Converts `snake_case` or `SNAKE_CASE` to `PascalCase`.
-/// If the input is already in `PascalCase` it will be returned as is.
 fn pascal_case_from_snake_case(snake_case: &str) -> String {
-	let mut result = String::new();
+    let mut result = String::new();
+    let mut capitalize_next = true;
 
-	let should_lower = snake_case
-		.chars()
-		.filter(|c| c.is_alphabetic())
-		.all(|c| c.is_uppercase());
+    for c in snake_case.chars() {
+        if c == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(c.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(c.to_ascii_lowercase());
+        }
+    }
 
-	for part in snake_case.split('_') {
-		for (i, c) in part.chars().enumerate() {
-			if i == 0 {
-				result.push(c.to_ascii_uppercase());
-			} else if should_lower {
-				result.push(c.to_ascii_lowercase());
-			} else {
-				result.push(c);
-			}
-		}
-	}
-
-	result
+    result
 }

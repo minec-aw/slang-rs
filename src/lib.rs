@@ -176,7 +176,12 @@ pub struct GlobalSession(IUnknown);
 
 unsafe impl Interface for GlobalSession {
 	type Vtable = sys::IGlobalSessionVtable;
-	const IID: UUID = uuid(0xc140b5fd_0c78_452e_ba7c1a1e70c7f71c);
+    const IID: UUID = uuid(
+        0xc140b5fd,
+        0xc78,
+        0x452e,
+        [0xba, 0x7c, 0x1a, 0x1e, 0x70, 0xc7, 0xf7, 0x1c],
+    );
 }
 
 impl GlobalSession {
